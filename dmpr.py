@@ -13,8 +13,8 @@ exa_conf = """
     "mcast-v6-tx-addr" : "ff05:0:0:0:0:0:0:2",
     "proto-transport-enable"  : [ "v4" ],
     "interfaces" : [
-      { "name" : "wlan0", "addr-v4" : "10.0.0.1", "link-characteristics" : { "bandwidth" : "100000", "loss" : "0"  } },
-      { "name" : "tetra0", "addr-v4" : "10.0.0.1", "link-characteristics" : { "bandwidth" : "10000",  "loss" : "0"  } }
+      { "name" : "wlan0", "addr-v4" : "10.0.0.1", "link-characteristics" : { "bandwidth" : "100000", "loss" : "0" , "cost" : "1" } },
+      { "name" : "tetra0", "addr-v4" : "10.0.0.1", "link-characteristics" : { "bandwidth" : "10000",  "loss" : "0" , "cost" : "0" } }
     ],
     "networks" : [
        { "proto": "v4", "prefix" : "192.168.1.0", "prefix-len" : "24" },
@@ -117,6 +117,7 @@ class DMPR(object):
                 interface_data["link-characteristics"] = dict()
                 interface_data["link-characteristics"]["bandwidth"] = DMPRConfigDefaults.LINK_CHARACTERISITCS_BANDWIDTH
                 interface_data["link-characteristics"]["loss"] = DMPRConfigDefaults.LINK_CHARACTERISITCS_LOSS
+                interface_data["link-characteristics"]["cost"] = DMPRConfigDefaults.LINK_CHARACTERISITCS_COST
         if "networks" in configuration:
             if not isinstance(configuration["networks"], list):
                 msg = "networks must be a list!"
@@ -201,7 +202,9 @@ class DMPR(object):
                 ipstr = "{}/{}".format(network["prefix"], network["prefix-len"])
                 packet['networks'].append({ "v4-prefix" : ipstr })
         packet['routingpaths'] = dict()
-        if len(self.fib['high_bandwidth'])>0 or len(self.fib['low_loss'])>0:
+       # if len(self.fib['high_bandwidth'])>0 or len(self.fib['low_loss'])>0:
+        if len(self.fib['high_bandwidth'])>0 or len(self.fib['low_loss'])>0 or len(self.fib['bw_and_loss']) or len(self.fib['no_cost']) or len(self.fib['bw_and_cost'])>0:
+
            packet['routingpaths']=self.fib.copy()
         return packet
 
@@ -285,6 +288,9 @@ class DMPR(object):
         self.fib = dict()
         self.fib['high_bandwidth'] = dict()
         self.fib['low_loss'] = dict()
+        self.fib['bw_and_loss'] = dict()
+        self.fib['no_cost'] = dict()
+        self.fib['bw_and_cost'] = dict()
 
 
     def _sequence_no(self, interface_name):
@@ -434,13 +440,21 @@ class DMPR(object):
         # see _routing_table_update() this is how the routing
         # table should look like and saved under
         # self._routing_table
+        # k1 and k2 value for bw and loss compound metric calculation
+        #k1=k2=1 by default
+        k1 = 1
+        k2 = 100
         loss_flag = True
         bandwidth_flag = True
+        cost_flag = True
         self._routing_table = dict()
         neigh_routing_paths = dict()
         self.fib = dict()
         self.fib['low_loss'] = dict()
         self.fib['high_bandwidth'] = dict()
+        self.fib['bw_and_loss'] = dict()
+        self.fib['no_cost'] = dict()
+        self.fib['bw_and_cost'] = dict()
         self.fib['path_characteristics'] = dict()
         neigh_routing_paths = self._calc_neigh_routing_paths(neigh_routing_paths)
         if loss_flag==True:
@@ -449,6 +463,16 @@ class DMPR(object):
         if bandwidth_flag==True:
            self._calc_fib_high_bandwidth(neigh_routing_paths)
            self._calc_bw_routingtable()
+        if loss_flag==True and bandwidth_flag==True:
+           self._calc_fib_bw_and_loss(neigh_routing_paths,k1,k2)
+           self._calc_bw_and_loss_routingtable()
+        if cost_flag==True:
+           self._calc_fib_no_cost(neigh_routing_paths)
+           self._calc_cost_routingtable()
+        if cost_flag==True and bandwidth_flag==True:
+           self._calc_fib_bw_and_cost(neigh_routing_paths)
+           self._calc_bw_and_cost_routingtable()
+
         self.log.debug(self.fib)
         self.log.debug(self._routing_table)
         # routing table calculated, now inform our "parent"
@@ -461,6 +485,9 @@ class DMPR(object):
         neigh_routing_paths['othernode_paths'] = dict()
         neigh_routing_paths['othernode_paths']['high_bandwidth'] = dict()
         neigh_routing_paths['othernode_paths']['low_loss'] = dict()
+        neigh_routing_paths['othernode_paths']['no_cost'] = dict()
+        neigh_routing_paths['othernode_paths']['bw_and_loss'] = dict()
+        neigh_routing_paths['othernode_paths']['bw_and_cost'] = dict()
         for iface,iface_data in self._rtd["interfaces"].items():
             for sender_id,sender_data_raw in iface_data["rx-msg-db"].items():
                 sender_data = dict()
@@ -473,6 +500,11 @@ class DMPR(object):
                                                                        neigh_routing_paths)
                    neigh_routing_paths = self._add_all_othernodes_bw(sender_id, sender_data,
                                                                      neigh_routing_paths)
+                   neigh_routing_paths = self._add_all_othernodes_bw_and_loss(sender_id, sender_data,
+                                                                      neigh_routing_paths)
+                   neigh_routing_paths = self._add_all_othernodes_no_cost(sender_id, sender_data,                                                                                                neigh_routing_paths)
+                   neigh_routing_paths = self._add_all_othernodes_bw_and_cost(sender_id, sender_data,
+                                                                      neigh_routing_paths)
         self.log.debug(neigh_routing_paths)
         return neigh_routing_paths
 
@@ -519,7 +551,7 @@ class DMPR(object):
            othernodes_bw[sender_id] = dict()
            othernodes_bw[sender_id]['path_characteristics'] = dict()
         else:
-             self.log.info('updating high bandwidth other nodes from the existing neighbour')
+             self.log.info('updating high bandwidth routes to other nodes from the existing neighbour')
         sender_routeinfo = dict()
         sender_routeinfo = sender_data['msg']['routingpaths'].copy()
         othernodes_bw[sender_id] = sender_routeinfo['high_bandwidth']
@@ -535,12 +567,57 @@ class DMPR(object):
            othernodes_loss[sender_id] = dict()
            othernodes_loss[sender_id]['path_characteristics'] = dict()
         else:
-             self.log.info('updating low loss other nodes from the existing neighbour')
+             self.log.info('updating low loss routes to other nodes from the existing neighbour')
         sender_routeinfo = dict()
         sender_routeinfo = sender_data['msg']['routingpaths'].copy()
         othernodes_loss[sender_id] = sender_routeinfo['low_loss']
         othernodes_loss[sender_id]['path_characteristics'] = sender_routeinfo['path_characteristics']
         neigh_routing_paths['othernode_paths']['low_loss'] = othernodes_loss.copy()
+        return neigh_routing_paths
+
+    def _add_all_othernodes_bw_and_loss(self, sender_id, sender_data, neigh_routing_paths):
+        othernodes_bw_and_loss = dict()
+        othernodes_bw_and_loss = neigh_routing_paths['othernode_paths']['bw_and_loss'].copy()
+        if not sender_id in othernodes_bw_and_loss:
+           othernodes_bw_and_loss[sender_id] = dict()
+           othernodes_bw_and_loss[sender_id]['path_characteristics'] = dict()
+        else:
+             self.log.info('updating bw and loss compound route to other nodes from the existing neighbour')
+        sender_routeinfo = dict()
+        sender_routeinfo = sender_data['msg']['routingpaths'].copy()
+        othernodes_bw_and_loss[sender_id] = sender_routeinfo['bw_and_loss']
+        othernodes_bw_and_loss[sender_id]['path_characteristics'] = sender_routeinfo['path_characteristics']
+        neigh_routing_paths['othernode_paths']['bw_and_loss'] = othernodes_bw_and_loss.copy()
+        return neigh_routing_paths
+
+    def _add_all_othernodes_no_cost(self, sender_id, sender_data, neigh_routing_paths):
+        othernodes_no_cost = dict()
+        othernodes_no_cost = neigh_routing_paths['othernode_paths']['no_cost'].copy()
+        if not sender_id in othernodes_no_cost:
+           othernodes_no_cost[sender_id] = dict()
+           othernodes_no_cost[sender_id]['path_characteristics'] = dict()
+        else:
+             self.log.info('updating no monetary cost route to other nodes from the existing neighbour')
+        sender_routeinfo = dict()
+        sender_routeinfo = sender_data['msg']['routingpaths'].copy()
+        othernodes_no_cost[sender_id] = sender_routeinfo['no_cost']
+        othernodes_no_cost[sender_id]['path_characteristics'] = sender_routeinfo['path_characteristics']
+        neigh_routing_paths['othernode_paths']['no_cost'] = othernodes_no_cost.copy()
+        return neigh_routing_paths
+
+    def _add_all_othernodes_bw_and_cost(self, sender_id, sender_data, neigh_routing_paths):
+        othernodes_bw_and_cost = dict()
+        othernodes_bw_and_cost = neigh_routing_paths['othernode_paths']['bw_and_cost'].copy()
+        if not sender_id in othernodes_bw_and_cost:
+           othernodes_bw_and_cost[sender_id] = dict()
+           othernodes_bw_and_cost[sender_id]['path_characteristics'] = dict()
+        else:
+             self.log.info('updating filtered bandwidth and cost route to other nodes from the existing neighbour')
+        sender_routeinfo = dict()
+        sender_routeinfo = sender_data['msg']['routingpaths'].copy()
+        othernodes_bw_and_cost[sender_id] = sender_routeinfo['bw_and_cost']
+        othernodes_bw_and_cost[sender_id]['path_characteristics'] = sender_routeinfo['path_characteristics']
+        neigh_routing_paths['othernode_paths']['bw_and_cost'] = othernodes_bw_and_cost.copy()
         return neigh_routing_paths
 
 
@@ -573,6 +650,49 @@ class DMPR(object):
         self._add_self_to_neigh_bandwidthpathnumber()
         self._add_bandwidthweight_to_dest()
 
+    def _calc_fib_bw_and_loss(self, neigh_routing_paths,k1,k2):
+        weigh_bw_and_loss = dict()
+        compressedBWLoss = dict()
+        for neigh_id, neigh_data in neigh_routing_paths['neighs'].items():
+            weigh_bw_and_loss = self._bw_and_loss_path_compression(neigh_data,k1,k2)
+            compressedBWLoss = self.add_bw_and_loss_entry(neigh_id, neigh_data,
+                                                          weigh_bw_and_loss, compressedBWLoss)
+        self.fib['bw_and_loss'] = compressedBWLoss.copy()
+        if len(neigh_routing_paths['othernode_paths']['bw_and_loss']) > 0:
+           self._calc_CompoundBWLoss_path(neigh_routing_paths)
+        self._map_path_characteristics_BW_and_loss(neigh_routing_paths)
+        self._add_self_to_neigh_BW_and_loss_pathnumber()
+        self._add_BW_and_lossweight_to_dest(k1, k2)
+
+    def _calc_fib_no_cost(self, neigh_routing_paths):
+        weigh_cost = dict()
+        compressedCost = dict()
+        for neigh_id, neigh_data in neigh_routing_paths['neighs'].items():
+            weigh_cost = self._no_cost_path_compression(neigh_data)
+            if len(weigh_cost) > 0:
+               compressedCost = self.add_cost_entry(neigh_id, neigh_data,
+                                                    weigh_cost, compressedCost)
+        self.fib['no_cost'] = compressedCost.copy()
+        if len(neigh_routing_paths['othernode_paths']['no_cost']) > 0:
+           self._calc_nocost_path(neigh_routing_paths)
+        self._map_path_characteristics_cost(neigh_routing_paths)
+        self._add_self_to_neigh_cost_pathnumber()
+        self._add_costweight_to_dest()
+
+    def _calc_fib_bw_and_cost(self, neigh_routing_paths):
+        weigh_bw_and_cost = dict()
+        compressedBWCost = dict()
+        for neigh_id, neigh_data in neigh_routing_paths['neighs'].items():
+            weigh_bw_and_cost = self._bw_and_cost_path_compression(neigh_data)
+            if len(weigh_bw_and_cost) >0:
+               compressedBWCost = self.add_bw_and_cost_entry(neigh_id, neigh_data,
+                                                          weigh_bw_and_cost, compressedBWCost)
+        self.fib['bw_and_cost'] = compressedBWCost.copy()
+        if len(neigh_routing_paths['othernode_paths']['bw_and_cost']) > 0:
+           self._calc_filteredBWCost_path(neigh_routing_paths)
+        self._map_path_characteristics_BW_and_cost(neigh_routing_paths)
+        self._add_self_to_neigh_BW_and_cost_pathnumber()
+        self._add_BW_and_costweight_to_dest()
 
     def _loss_path_compression(self, neigh_data):
         loss_dict = dict()
@@ -610,6 +730,62 @@ class DMPR(object):
         return bandwidth_dict
 
 
+    def _bw_and_loss_path_compression(self, neigh_data, k1, k2):
+        bw_and_loss_dict = dict()
+        for neigh_path_key,neigh_paths_name in neigh_data['paths'].items():
+            for neigh_iface_name in neigh_paths_name:
+                for iface in self._conf['interfaces']:
+                     if iface['name'] == neigh_iface_name:
+                        loss = iface['link-characteristics']['loss']
+                        bw = iface['link-characteristics']['bandwidth']
+                        bw_and_loss = ((k1*(10000000/bw))+(k2*loss))
+                        if len(bw_and_loss_dict) > 0:
+                           for iface_name, iface_bw_and_loss in bw_and_loss_dict.items():
+                               if bw_and_loss < iface_bw_and_loss:
+                                  bw_and_loss_dict = dict()
+                                  bw_and_loss_dict[iface['name']] = bw_and_loss
+                        else:
+                             bw_and_loss_dict[iface['name']] = bw_and_loss
+                        break
+        return bw_and_loss_dict
+
+    def _no_cost_path_compression(self, neigh_data):
+        no_cost_dict = dict()
+        for neigh_path_key,neigh_paths_name in neigh_data['paths'].items():
+            for neigh_iface_name in neigh_paths_name:
+                for iface in self._conf['interfaces']:
+                    if iface['name'] == neigh_iface_name:
+                       cost = iface['link-characteristics']['cost']
+                       #if len(no_cost_dict) > 0:
+                         # for iface_name, iface_cost in no_cost_dict.items():
+                           #   if cost < iface_cost:
+                            #     no_cost_dict = dict()
+                             #    cost_dict[iface['name']] = cost
+                       #else:
+                       if cost == 0:
+                          no_cost_dict[iface['name']] = cost
+                       break
+        return no_cost_dict
+
+    def _bw_and_cost_path_compression(self, neigh_data):
+        bw_and_cost_dict = dict()
+        for neigh_path_key,neigh_paths_name in neigh_data['paths'].items():
+            for neigh_iface_name in neigh_paths_name:
+                for iface in self._conf['interfaces']:
+                    if iface['name'] == neigh_iface_name:
+                       cost = iface['link-characteristics']['cost']
+                       if cost == 0:
+                          bw = iface['link-characteristics']['bandwidth']
+                          if len(bw_and_cost_dict) > 0:
+                             for iface_name, iface_bw in bw_and_cost_dict.items():
+                                 if bw > iface_bw:
+                                    bw_and_cost_dict = dict()
+                                    bw_and_cost_dict[iface['name']] = bw
+                          else:
+                               bw_and_cost_dict[iface['name']] = bw
+                          break
+        return bw_and_cost_dict
+
     def add_loss_entry(self, neigh_id, neigh_data, weigh_loss, compressedloss):
         route = "{}>{}".format(self._conf["id"], neigh_id)
         compressedloss[neigh_id] = {'next-hop':neigh_data['next-hop'],
@@ -633,6 +809,39 @@ class DMPR(object):
             compressedBW[neigh_id]['paths'][route] = iface
         return compressedBW
 
+
+    def add_bw_and_loss_entry(self, neigh_id, neigh_data, weigh_bw_and_loss, compressedBWLoss):
+        route = "{}>{}".format(self._conf["id"], neigh_id)
+        compressedBWLoss[neigh_id] = {'next-hop':neigh_data['next-hop'],
+                                      'networks':neigh_data['networks']
+                                     }
+        for iface, iface_bw_and_loss in weigh_bw_and_loss.items():
+            compressedBWLoss[neigh_id]['weight'] = iface_bw_and_loss
+            compressedBWLoss[neigh_id]['paths'] = dict()
+            compressedBWLoss[neigh_id]['paths'][route] = iface
+        return compressedBWLoss
+
+    def add_cost_entry(self, neigh_id, neigh_data, weigh_cost, compressedCost):
+        route = "{}>{}".format(self._conf["id"], neigh_id)
+        compressedCost[neigh_id] = {'next-hop':neigh_data['next-hop'],
+                                    'networks':neigh_data['networks']
+                                   }
+        for iface, iface_cost in weigh_cost.items():
+            compressedCost[neigh_id]['weight'] = iface_cost
+            compressedCost[neigh_id]['paths'] = dict()
+            compressedCost[neigh_id]['paths'][route] = iface
+        return compressedCost
+
+    def add_bw_and_cost_entry(self, neigh_id, neigh_data, weigh_bw_and_cost, compressedBWCost):
+        route = "{}>{}".format(self._conf["id"], neigh_id)
+        compressedBWCost[neigh_id] = {'next-hop':neigh_data['next-hop'],
+                                     'networks':neigh_data['networks']
+                                     }
+        for iface, iface_bw_and_cost in weigh_bw_and_cost.items():
+            compressedBWCost[neigh_id]['weight'] = iface_bw_and_cost
+            compressedBWCost[neigh_id]['paths'] = dict()
+            compressedBWCost[neigh_id]['paths'][route] = iface
+        return compressedBWCost
 
     def _calc_shortestloss_path(self, neigh_routing_paths):
         path_weight = dict()
@@ -722,6 +931,135 @@ class DMPR(object):
         data['paths'] = dest_data['paths'].copy()
 
 
+    def _calc_CompoundBWLoss_path(self, neigh_routing_paths):
+        path_weight = dict()
+        for other_id, other_data in neigh_routing_paths['othernode_paths']['bw_and_loss'].items():
+            for dest_id, dest_data in other_data.items():
+                if dest_id != 'path_characteristics':
+                   if dest_id == self._conf["id"]:
+                      self.log.info('ignore self routing')
+                   else:
+                        bw_loss_to_neigh = int(self.fib['bw_and_loss'][other_id]['weight'])
+                        weight_update = int(dest_data['weight']) + bw_loss_to_neigh
+                        loop_found = False
+                        for path, path_bw_and_loss in dest_data['paths'].items():
+                            id1_in_path = path[0]
+                            id2_in_path = path[2]
+                            if id1_in_path == self._conf["id"] or id2_in_path == self._conf["id"]:
+                               loop_found = True
+                               self.log.info('self_id in the path so avoiding looping')
+                               break
+                        if loop_found==False:
+                           self.log.info('No loop will occur in this path')
+                           self.add_CompoundBWLoss_path(weight_update, other_id, dest_id, dest_data)
+
+
+    def add_CompoundBWLoss_path(self, weight_update, other_id, dest_id, dest_data):
+        if not dest_id in self.fib['bw_and_loss']:
+           self.log.info('it is a new entry to destination')
+           self.fib['bw_and_loss'][dest_id] = dict()
+           self._map_BWLoss_values(other_id, weight_update, dest_id, dest_data)
+        else:
+             if weight_update < self.fib['bw_and_loss'][dest_id]['weight']:
+                self.log.info('updating existing destination entry in fib')
+                self._map_BWLoss_values(other_id, weight_update, dest_id, dest_data)
+
+
+    def _map_BWLoss_values(self, other_id, weight_update, dest_id, dest_data):
+        data = self.fib['bw_and_loss'][dest_id]
+        data['networks'] = list()
+        data['paths'] = dict()
+        data['next-hop'] = other_id
+        data['weight'] = weight_update
+        data['networks'] = dest_data['networks'].copy()
+        data['paths'] = dest_data['paths'].copy()
+
+    def _calc_nocost_path(self, neigh_routing_paths):
+        path_weight = dict()
+        for other_id, other_data in neigh_routing_paths['othernode_paths']['no_cost'].items():
+            for dest_id, dest_data in other_data.items():
+                if dest_id != 'path_characteristics':
+                   if dest_id == self._conf["id"]:
+                      self.log.info('ignore self routing')
+                   else:
+                        cost_to_neigh = int(self.fib['no_cost'][other_id]['weight'])
+                        weight_update = int(dest_data['weight']) + cost_to_neigh
+                        loop_found = False
+                        for path, path_cost in dest_data['paths'].items():
+                            id1_in_path = path[0]
+                            id2_in_path = path[2]
+                            if id1_in_path == self._conf["id"] or id2_in_path == self._conf["id"]:
+                               loop_found = True
+                               self.log.info('self_id in the path so avoiding looping')
+                               break
+                        if loop_found==False:
+                           self.log.info('No loop will occur in this path')
+                           self.add_nocost_path(weight_update, other_id, dest_id, dest_data)
+
+
+    def add_nocost_path(self, weight_update, other_id, dest_id, dest_data):
+        if not dest_id in self.fib['no_cost']:
+           self.log.info('it is a new entry to destination')
+           self.fib['no_cost'][dest_id] = dict()
+           self._map_cost_values(other_id, weight_update, dest_id, dest_data)
+        else:
+             if weight_update < self.fib['no_cost'][dest_id]['weight']:
+                self.log.info('updating existing destination entry in fib')
+                self._map_cost_values(other_id, weight_update, dest_id, dest_data)
+
+
+    def _map_cost_values(self, other_id, weight_update, dest_id, dest_data):
+        data = self.fib['no_cost'][dest_id]
+        data['networks'] = list()
+        data['paths'] = dict()
+        data['next-hop'] = other_id
+        data['weight'] = weight_update
+        data['networks'] = dest_data['networks'].copy()
+        data['paths'] = dest_data['paths'].copy()
+
+    def _calc_filteredBWCost_path(self, neigh_routing_paths):
+        path_weight = dict()
+        for other_id, other_data in neigh_routing_paths['othernode_paths']['bw_and_cost'].items():
+            for dest_id, dest_data in other_data.items():
+                if dest_id != 'path_characteristics':
+                    if dest_id == self._conf["id"]:
+                       self.log.info('ignore self routing')
+                    else:
+                         bw_cost_to_neigh = int(self.fib['bw_and_cost'][other_id]['weight'])
+                         weight_update = int(dest_data['weight']) + bw_cost_to_neigh
+                         loop_found = False
+                         for path, path_cost in dest_data['paths'].items():
+                             id1_in_path = path[0]
+                             id2_in_path = path[2]
+                             if id1_in_path == self._conf["id"] or id2_in_path == self._conf["id"]:
+                                loop_found = True
+                                self.log.info('self_id in the path so avoiding looping')
+                                break
+                         if loop_found==False:
+                            self.log.info('No loop will occur in this path')
+                            self.add_bw_and_cost_path(weight_update, other_id, dest_id, dest_data)
+
+
+    def add_bw_and_cost_path(self, weight_update, other_id, dest_id, dest_data):
+        if not dest_id in self.fib['bw_and_cost']:
+           self.log.info('it is a new entry to destination')
+           self.fib['bw_and_cost'][dest_id] = dict()
+           self._map_bw_cost_values(other_id, weight_update, dest_id, dest_data)
+        else:
+             if weight_update < self.fib['bw_and_cost'][dest_id]['weight']:
+                self.log.info('updating existing destination entry in fib')
+                self._map_bw_cost_values(other_id, weight_update, dest_id, dest_data)
+
+
+    def _map_bw_cost_values(self, other_id, weight_update, dest_id, dest_data):
+        data = self.fib['bw_and_cost'][dest_id]
+        data['networks'] = list()
+        data['paths'] = dict()
+        data['next-hop'] = other_id
+        data['weight'] = weight_update
+        data['networks'] = dest_data['networks'].copy()
+        data['paths'] = dest_data['paths'].copy()
+
     def _map_path_characteristics_loss(self, neigh_routing_paths):
         path_num = 1
         for dest_id, dest_data in self.fib['low_loss'].items():
@@ -748,6 +1086,7 @@ class DMPR(object):
                           path_data = dict()
                           path_data['loss'] = iface['link-characteristics']['loss']
                           path_data['bandwidth'] = iface['link-characteristics']['bandwidth']
+                          path_data['cost'] = iface['link-characteristics']['cost']
                           path_num_new = self._map_path_number(path_data, path_num)
                           break
                    if path_num_found==True:
@@ -780,16 +1119,118 @@ class DMPR(object):
                             path_data = dict()
                             path_data['loss'] = iface['link-characteristics']['loss']
                             path_data['bandwidth'] = iface['link-characteristics']['bandwidth']
+                            path_data['cost'] = iface['link-characteristics']['cost']
                             path_num_new = self._map_path_number(path_data, path_num)
                             break
                      if path_num_found==True:
                         dest_data['paths'][path] = path_num_new
 
 
+    def _map_path_characteristics_BW_and_loss(self, neigh_routing_paths):
+        path_num = 1
+        for dest_id, dest_data in self.fib['bw_and_loss'].items():
+            next_hop = dest_data['next-hop']
+            path_num_found = False
+            if dest_id != next_hop:
+               self.log.info('This is not neighbour destination-BWLoss')
+               for path, path_number in dest_data['paths'].items():
+                   path_info = dict()
+                   path_info = neigh_routing_paths['othernode_paths']['bw_and_loss'][next_hop]['path_characteristics']
+                   for path_type, path_data in path_info.items():
+                       if path_number == path_type:
+                          path_num_found = True
+                          path_num_new = self._map_path_number(path_data, path_num)
+                          break
+                   if path_num_found==True:
+                      dest_data['paths'][path] = path_num_new
+            if dest_id == next_hop:
+               self.log.info('This is neighbour destination-BWLoss')
+               for path, path_number in dest_data['paths'].items():
+                   for iface in self._conf['interfaces']:
+                       if iface['name']==path_number:
+                          path_num_found = True
+                          path_data = dict()
+                          path_data['loss'] = iface['link-characteristics']['loss']
+                          path_data['bandwidth'] = iface['link-characteristics']['bandwidth']
+                          path_data['cost'] = iface['link-characteristics']['cost']
+                          path_num_new = self._map_path_number(path_data, path_num)
+                          break
+                   if path_num_found==True:
+                      dest_data['paths'][path] = path_num_new
+
+    def _map_path_characteristics_cost(self, neigh_routing_paths):
+        path_num = 1
+        self.log.debug(self.fib)
+        for dest_id, dest_data in self.fib['no_cost'].items():
+            next_hop = dest_data['next-hop']
+            path_num_found = False
+            if dest_id != next_hop:
+               self.log.info('This is not neighbour destination-Cost')
+               for path, path_number in dest_data['paths'].items():
+                   path_info = dict()
+                   path_info = neigh_routing_paths['othernode_paths']['no_cost'][next_hop]['path_characteristics']
+                   for path_type, path_data in path_info.items():
+                       if path_number == path_type:
+                          path_num_found = True
+                          path_num_new = self._map_path_number(path_data, path_num)
+                          break
+                   if path_num_found==True:
+                      dest_data['paths'][path] = path_num_new
+            if dest_id == next_hop:
+               self.log.info('This is neighbour destination-Cost')
+               self.log.debug(dest_data['paths'])
+               for path, path_number in dest_data['paths'].items():
+                   for iface in self._conf['interfaces']:
+                       if iface['name']==path_number:
+                          path_num_found = True
+                          path_data = dict()
+                          path_data['loss'] = iface['link-characteristics']['loss']
+                          path_data['bandwidth'] = iface['link-characteristics']['bandwidth']
+                          path_data['cost'] = iface['link-characteristics']['cost']
+                          path_num_new = self._map_path_number(path_data, path_num)
+                          break
+                   if path_num_found==True:
+                      dest_data['paths'][path] = path_num_new
+
+
+    def _map_path_characteristics_BW_and_cost(self, neigh_routing_paths):
+        path_num = 1
+        for dest_id, dest_data in self.fib['bw_and_cost'].items():
+            next_hop = dest_data['next-hop']
+            path_num_found = False
+            if dest_id != next_hop:
+               self.log.info('This is not neighbour destination-BWCost')
+               for path, path_number in dest_data['paths'].items():
+                   path_info = dict()
+                   path_info = neigh_routing_paths['othernode_paths']['bw_and_cost'][next_hop]['path_characteristics']
+                   for path_type, path_data in path_info.items():
+                       if path_number == path_type:
+                          path_num_found = True
+                          path_num_new = self._map_path_number(path_data, path_num)
+                          break
+                   if path_num_found==True:
+                      dest_data['paths'][path] = path_num_new
+            if dest_id == next_hop:
+               self.log.info('This is neighbour destination-BWCost')
+               for path, path_number in dest_data['paths'].items():
+                   for iface in self._conf['interfaces']:
+                       if iface['name']==path_number:
+                          path_num_found = True
+                          path_data = dict()
+                          path_data['loss'] = iface['link-characteristics']['loss']
+                          path_data['cost'] = iface['link-characteristics']['cost']
+                          path_data['bandwidth'] = iface['link-characteristics']['bandwidth']
+                          path_num_new = self._map_path_number(path_data, path_num)
+                          break
+                   if path_num_found==True:
+                      dest_data['paths'][path] = path_num_new
+
+
     def _map_path_number(self, path_data, path_num):
         path_char_found = False
+        self.log.debug(self.fib['path_characteristics'])
         for fib_path_name, fib_path_data in self.fib['path_characteristics'].items():
-            if (path_data['loss']==fib_path_data['loss']) and (path_data['bandwidth']==fib_path_data['bandwidth']):
+            if (path_data['loss']==fib_path_data['loss']) and (path_data['bandwidth']==fib_path_data['bandwidth']) and (path_data['cost']==fib_path_data['cost']) :
                self.log.info('This is already existing path cahracteristic')
                path_num_new = fib_path_name
                path_char_found = True
@@ -824,6 +1265,33 @@ class DMPR(object):
                        self.fib['high_bandwidth'][dest_id]['paths'][path] = path_num
 
 
+    def _add_self_to_neigh_BW_and_loss_pathnumber(self):
+        for i in range(2):
+            for dest_id, dest_data in self.fib['bw_and_loss'].items():
+                next_hop = dest_data['next-hop']
+                if dest_id != next_hop:
+                   for path, path_num in self.fib['bw_and_loss'][next_hop]['paths'].items():
+                       self.fib['bw_and_loss'][dest_id]['paths'][path] = path_num
+
+
+    def _add_self_to_neigh_cost_pathnumber(self):
+        for i in range(2):
+            for dest_id, dest_data in self.fib['no_cost'].items():
+                next_hop = dest_data['next-hop']
+                if dest_id != next_hop:
+                   for path, path_num in self.fib['no_cost'][next_hop]['paths'].items():
+                       self.fib['no_cost'][dest_id]['paths'][path] = path_num
+
+
+    def _add_self_to_neigh_BW_and_cost_pathnumber(self):
+        for i in range(2):
+            for dest_id, dest_data in self.fib['bw_and_cost'].items():
+                next_hop = dest_data['next-hop']
+                if dest_id != next_hop:
+                   for path, path_num in self.fib['bw_and_cost'][next_hop]['paths'].items():
+                       self.fib['bw_and_cost'][dest_id]['paths'][path] = path_num
+
+
     def _add_lossweight_to_dest(self):
         for dest_id, dest_data in self.fib['low_loss'].items():
             self.fib['low_loss'][dest_id]['weight'] = 0
@@ -843,6 +1311,40 @@ class DMPR(object):
                     if path_num == path_fib:
                        weight_pre = self.fib['high_bandwidth'][dest_id]['weight']
                        self.fib['high_bandwidth'][dest_id]['weight'] = weight_pre + path_data_fib['bandwidth']
+                       break
+
+
+    def _add_BW_and_lossweight_to_dest(self, k1, k2):
+        for dest_id, dest_data in self.fib['bw_and_loss'].items():
+            self.fib['bw_and_loss'][dest_id]['weight'] = 0
+            for path, path_num in dest_data['paths'].items():
+                for path_fib, path_data_fib in self.fib['path_characteristics'].items():
+                    if path_num == path_fib:
+                       weight_pre = self.fib['bw_and_loss'][dest_id]['weight']
+                       bw = path_data_fib['bandwidth']
+                       loss = path_data_fib['loss']
+                       compound_metric = ((k1*(10000000/bw))+(k2*loss))
+                       self.fib['bw_and_loss'][dest_id]['weight'] = weight_pre + compound_metric
+                       break
+
+    def _add_costweight_to_dest(self):
+        for dest_id, dest_data in self.fib['no_cost'].items():
+            self.fib['no_cost'][dest_id]['weight'] = 0
+            for path, path_num in dest_data['paths'].items():
+                for path_fib, path_data_fib in self.fib['path_characteristics'].items():
+                    if path_num == path_fib:
+                       weight_pre = self.fib['no_cost'][dest_id]['weight']
+                       self.fib['no_cost'][dest_id]['weight'] = weight_pre + path_data_fib['cost']
+                       break
+
+    def _add_BW_and_costweight_to_dest(self):
+        for dest_id, dest_data in self.fib['bw_and_cost'].items():
+            self.fib['bw_and_cost'][dest_id]['weight'] = 0
+            for path, path_num in dest_data['paths'].items():
+                for path_fib, path_data_fib in self.fib['path_characteristics'].items():
+                    if path_num == path_fib:
+                       weight_pre = self.fib['bw_and_cost'][dest_id]['weight']
+                       self.fib['bw_and_cost'][dest_id]['weight'] = weight_pre + path_data_fib['bandwidth']
                        break
 
 
@@ -904,6 +1406,96 @@ class DMPR(object):
                       break
                 bw_entry['next-hop'] = self.next_hop_ip_addr(bw_entry['proto'], dest_data['next-hop'], bw_entry['interface'])
                 self._routing_table['highest-bandwidth'].append(bw_entry)
+
+
+    def _calc_bw_and_loss_routingtable(self):
+        self._routing_table['formular_bw_loss']=list()
+        for dest_id, dest_data in self.fib['bw_and_loss'].items():
+            for network in dest_data['networks']:
+                bwloss_entry=dict()
+                for prefix_type, prefix_ip in network.items():
+                    bwloss_entry['proto'] = "v4"
+                    ip_pref_len = prefix_ip.split("/")
+                    bwloss_entry['prefix'] = ip_pref_len[0]
+                    bwloss_entry['prefix-len'] = ip_pref_len[1]
+                search_key='{}>{}'.format(self._conf["id"], dest_data['next-hop'])
+                for path, path_num in dest_data['paths'].items():
+                    if path == search_key:
+                       for fib_path, fib_path_data in self.fib['path_characteristics'].items():
+                           if fib_path == path_num:
+                              path_found = False
+                              for iface in self._conf['interfaces']:
+                                  path_char = dict()
+                                  path_char = iface['link-characteristics']
+                                  if path_char['loss']==fib_path_data['loss'] and path_char['bandwidth']==fib_path_data['bandwidth']:
+                                     path_found = True
+                                     bwloss_entry['interface'] = iface['name']
+                                     break
+                              if path_found==True:
+                                 break
+                    break
+                bwloss_entry['next-hop'] = self.next_hop_ip_addr(bwloss_entry['proto'], dest_data['next-hop'], bwloss_entry['interface'])
+                self._routing_table['formular_bw_loss'].append(bwloss_entry)
+
+
+    def _calc_cost_routingtable(self):
+        self._routing_table['no-cost']=list()
+        for dest_id, dest_data in self.fib['no_cost'].items():
+            for network in dest_data['networks']:
+                cost_entry=dict()
+                for prefix_type, prefix_ip in network.items():
+                    cost_entry['proto'] = "v4"
+                    ip_pref_len = prefix_ip.split("/")
+                    cost_entry['prefix'] = ip_pref_len[0]
+                    cost_entry['prefix-len'] = ip_pref_len[1]
+                search_key='{}>{}'.format(self._conf["id"], dest_data['next-hop'])
+                for path, path_num in dest_data['paths'].items():
+                    if path == search_key:
+                       for fib_path, fib_path_data in self.fib['path_characteristics'].items():
+                           if fib_path == path_num:
+                              path_found = False
+                              for iface in self._conf['interfaces']:
+                                  path_char = dict()
+                                  path_char = iface['link-characteristics']
+                                  if path_char['cost']==fib_path_data['cost']:
+                                     path_found = True
+                                     cost_entry['interface'] = iface['name']
+                                     break
+                              if path_found==True:
+                                 break
+                    break
+                cost_entry['next-hop'] = self.next_hop_ip_addr(cost_entry['proto'], dest_data['next-hop'], cost_entry['interface'])
+                self._routing_table['no-cost'].append(cost_entry)
+
+
+    def _calc_bw_and_cost_routingtable(self):
+        self._routing_table['filtered-bw-cost']=list()
+        for dest_id, dest_data in self.fib['bw_and_cost'].items():
+            for network in dest_data['networks']:
+                bw_cost_entry=dict()
+                for prefix_type, prefix_ip in network.items():
+                    bw_cost_entry['proto'] = "v4"
+                    ip_pref_len = prefix_ip.split("/")
+                    bw_cost_entry['prefix'] = ip_pref_len[0]
+                    bw_cost_entry['prefix-len'] = ip_pref_len[1]
+                search_key='{}>{}'.format(self._conf["id"], dest_data['next-hop'])
+                for path, path_num in dest_data['paths'].items():
+                    if path == search_key:
+                       for fib_path, fib_path_data in self.fib['path_characteristics'].items():
+                           if fib_path == path_num:
+                              path_found = False
+                              for iface in self._conf['interfaces']:
+                                  path_char = dict()
+                                  path_char = iface['link-characteristics']
+                                  if path_char['cost']==fib_path_data['cost'] and path_char['bandwidth']==fib_path_data['bandwidth']:
+                                     path_found = True
+                                     bw_cost_entry['interface'] = iface['name']
+                                     break
+                              if path_found==True:
+                                 break
+                    break
+                bw_cost_entry['next-hop'] = self.next_hop_ip_addr(bw_cost_entry['proto'], dest_data['next-hop'], bw_cost_entry['interface'])
+                self._routing_table['filtered-bw-cost'].append(bw_cost_entry)
 
 
     def register_get_time_cb(self, function, priv_data=None):
